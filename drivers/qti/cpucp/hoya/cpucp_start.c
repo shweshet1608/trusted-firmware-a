@@ -141,6 +141,8 @@ void qti_cpucp_init(void)
 	const struct cpucp_config *cfg = cpucp_get_config();
 	uint32_t version = mmio_read_32(SHARED(version));
 
+	cpucp_scmi_init();
+
 	if (version != CPUCP_SHARED_VERSION) {
 		ERROR("CPUCP: unsupported firmware interface %u\n", version);
 		return;

@@ -18,7 +18,7 @@
 #define SCMI_AP_CORE_PROTO_VER			MAKE_SCMI_VERSION(3, 0)
 #define SCMI_PWR_DMN_PROTO_VER			MAKE_SCMI_VERSION(3, 0)
 #define SCMI_SYS_PWR_PROTO_VER			MAKE_SCMI_VERSION(3, 0)
-#define SCMI_CLOCK_PROTO_VER                    MAKE_SCMI_VERSION(3, 0)
+#define SCMI_CLOCK_PROTO_VER			MAKE_SCMI_VERSION(3, 0)
 
 #define GET_SCMI_MAJOR_VER(ver)			(((ver) >> 16) & 0xffff)
 #define GET_SCMI_MINOR_VER(ver)			((ver) & 0xffff)

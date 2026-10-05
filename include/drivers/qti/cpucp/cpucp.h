@@ -15,8 +15,19 @@
 
 #ifdef QTI_CPUCP_ENABLED
 
-/* Request to enable the clock domain owning the calling core on cold boot. */
-void cpucp_clkdom_init(void);
+/*
+ * Bring up the SCMI channel to CPUCP. Must be called exactly once, by the
+ * boot core, before any SCMI protocol (clock domain, or others added later)
+ * is used over the channel.
+ */
+void cpucp_scmi_init(void);
+
+/*
+ * Request to enable the clock domain(s) owning the calling core on cold
+ * boot. Returns an SCMI status code: SCMI_E_INVALID_PARAM if the calling
+ * core has no clock domain mapping, SCMI_E_SUCCESS otherwise.
+ */
+int cpucp_clkdom_init(void);
 
 /* Bring the CPUCP (EPSS/RISC-V MUC) microcontroller out of reset on cold boot. */
 void qti_cpucp_init(void);

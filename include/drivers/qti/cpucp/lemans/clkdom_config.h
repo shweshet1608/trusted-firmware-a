@@ -19,4 +19,7 @@ enum clock_domain_id {
 	CD_MAX
 };
 
+/* One parent map entry per DSU cluster (CL0, CL1). */
+#define CLKDOM_PARENT_MAP_COUNT		2U
+
 #endif /* QTI_CPUCP_LEMANS_CLKDOM_CONFIG_H */

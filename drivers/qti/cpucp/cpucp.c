@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include <common/debug.h>
 #include <cpu_config.h>
 #include <cpucp.h>
 #include <cpucp_hwio.h>
@@ -15,23 +16,14 @@
 #include <lib/spinlock.h>
 #include <plat/common/platform.h>
 
-#include <scmi_private.h>
-
 /*
  * Lean CPUCP host driver for TF-A. Only the clock-domain enable path that is
  * required during secondary-core cold boot is implemented. CPUCP speaks the
  * SCMI protocol over a shared-memory mailbox, so the generic TF-A SCMI driver
- * (drivers/arm/css/scmi) is reused for the transport and message handling; this
- * file only wires up the CPUCP mailbox/doorbell and issues the SCMI Clock
- * Management "config set" command that is not part of the generic driver.
+ * (drivers/arm/css/scmi) is reused for both the transport and the SCMI Clock
+ * Management "config set" command; this file only wires up the CPUCP
+ * mailbox/doorbell and the clock-domain parent map.
  */
-
-/* SCMI Clock Management protocol (SCMI spec, Section 4.6). */
-#define SCMI_CLOCK_PROTO_ID			0x14
-#define SCMI_CLOCK_CONFIG_SET_MSG		0x7
-
-/* Message length: header word (4) + clock_id (4) + attributes (4). */
-#define SCMI_CLOCK_CONFIG_SET_MSG_LEN		12
 
 /* CLOCK_CONFIG_SET attributes: enable the clock. */
 #define SCMI_CLOCK_CONFIG_SET_ENABLE		0x1
@@ -71,52 +63,60 @@ static scmi_channel_t cpucp_scmi_channel = {
 };
 
 /*
- * cpucp_scmi_clock_enable - issue an SCMI Clock Management CLOCK_CONFIG_SET
- * (enable) command for @clock_id over the CPUCP channel, returning the SCMI
- * status code.
+ * cpucp_scmi_init - bring up the SCMI channel to CPUCP.
+ *
+ * Must be called exactly once, by the boot core, before any other core can
+ * start issuing SCMI commands over the channel (e.g. before secondary cores
+ * are brought online).
  */
-static int cpucp_scmi_clock_enable(void *p, uint32_t clock_id)
+void cpucp_scmi_init(void)
 {
-	mailbox_mem_t *mbx_mem;
-	unsigned int token = 0U;
-	int ret;
-	scmi_channel_t *ch = (scmi_channel_t *)p;
-
-	validate_scmi_channel(ch);
-
-	scmi_get_channel(ch);
-
-	mbx_mem = (mailbox_mem_t *)(ch->info->scmi_mbx_mem);
-	mbx_mem->msg_header = SCMI_MSG_CREATE(SCMI_CLOCK_PROTO_ID,
-					     SCMI_CLOCK_CONFIG_SET_MSG, token);
-	mbx_mem->len = SCMI_CLOCK_CONFIG_SET_MSG_LEN;
-	mbx_mem->flags = SCMI_FLAG_RESP_POLL;
-	SCMI_PAYLOAD_ARG2(mbx_mem->payload, clock_id,
-			  SCMI_CLOCK_CONFIG_SET_ENABLE);
-
-	scmi_send_sync_command(ch);
-
-	/* Get the SCMI return status. */
-	SCMI_PAYLOAD_RET_VAL1(mbx_mem->payload, ret);
-
-	scmi_put_channel(ch);
-
-	return ret;
+	cpucp_scmi_handle = scmi_init(&cpucp_scmi_channel, NULL);
+	assert(cpucp_scmi_handle != NULL);
 }
 
 /*
- * cpucp_clkdom_init - request CPUCP to enable the clock domain owning the
- * calling core during cold boot.
- *
- * If the calling core is the first core of its clock domain to cold boot, issue
- * an SCMI Clock Management "config set" command to CPUCP to enable the clock
- * domain.
+ * clkdom_enable - issue the SCMI "config set" enable command for @clkdom if
+ * it has not already been initialised. Caller must hold
+ * cpucp_clkdom_init_spinlock.
  */
-void cpucp_clkdom_init(void)
+static void clkdom_enable(unsigned int clkdom)
+{
+	int ret;
+
+	if (clkdom_init_status[clkdom] == 0U) {
+		ret = scmi_clock_config_set(cpucp_scmi_handle, clkdom,
+					     SCMI_CLOCK_CONFIG_SET_ENABLE, 0U);
+		if (ret == SCMI_E_SUCCESS) {
+			clkdom_init_status[clkdom] = 1U;
+		} else {
+			ERROR("Failed to enable clock domain %u (%d)\n",
+			      clkdom, ret);
+		}
+	}
+}
+
+/*
+ * cpucp_clkdom_init - request CPUCP to enable the CPU and L3 clock domains
+ * owning the calling core during cold boot.
+ *
+ * Looks up the parent clock domains for the calling core's cluster (its CPU
+ * domain and the L3 domain it shares with the rest of the cluster) and
+ * enables whichever of the two have not already been initialised. Either
+ * domain may already be up (e.g. brought up by the boot firmware instead of
+ * over SCMI), so each is checked independently. Requires cpucp_scmi_init()
+ * to have already been called.
+ *
+ * Returns SCMI_E_INVALID_PARAM if the calling core does not belong to any
+ * entry in clkdom_parent_maps[], SCMI_E_SUCCESS otherwise.
+ */
+int cpucp_clkdom_init(void)
 {
 	unsigned int core_pos = plat_my_core_pos();
 	uint32_t linear_id;
-	int i;
+	unsigned int i;
+
+	assert(cpucp_scmi_handle != NULL);
 
 	/* CPU masks are 32-bit, so the core index must fit a 32-bit shift. */
 	assert(core_pos < 32U);
@@ -124,26 +124,17 @@ void cpucp_clkdom_init(void)
 
 	spin_lock(&cpucp_clkdom_init_spinlock);
 
-	/* Bring up the SCMI channel on first use. */
-	if (cpucp_scmi_handle == NULL) {
-		cpucp_scmi_handle = scmi_init(&cpucp_scmi_channel, NULL);
-		assert(cpucp_scmi_handle != NULL);
-	}
-
-	for (i = 0; i < CD_MAX; i++) {
-		if ((clkdom_init_status[i] != 0U) ||
-		    ((linear_id & clkdom_cpumasks[i].cpumask) == 0U)) {
+	for (i = 0U; i < CLKDOM_PARENT_MAP_COUNT; i++) {
+		if ((linear_id & clkdom_parent_maps[i].cpumask) == 0U) {
 			continue;
 		}
 
-		if (cpucp_scmi_clock_enable(cpucp_scmi_handle,
-					    clkdom_cpumasks[i].clkdom) ==
-		    SCMI_E_SUCCESS) {
-			clkdom_init_status[i] = 1U;
-		}
-
+		clkdom_enable(clkdom_parent_maps[i].l3_id);
+		clkdom_enable(clkdom_parent_maps[i].cpu_id);
 		break;
 	}
 
 	spin_unlock(&cpucp_clkdom_init_spinlock);
+
+	return (i < CLKDOM_PARENT_MAP_COUNT) ? SCMI_E_SUCCESS : SCMI_E_INVALID_PARAM;
 }
